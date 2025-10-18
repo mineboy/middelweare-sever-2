@@ -1,52 +1,64 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
+// inside your server.js (replace the old handler)
+app.post("/shopify/order-created", async (req, res) => {
+  try {
+    const order = req.body || {};
 
-const app = express();
-app.use(bodyParser.json());
+    // extract shipping address safely
+    const ship = order.shipping_address || {};
+    const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
 
-const FDG_API_URL = "https://www.firstdeliverygroup.com/api/v2/create";
-const FDG_TOKEN = "d23aa970-7284-4035-a6bf-a29704192bce";
+    // Build client object as FDG expects
+    const client = {
+      nom: `${(ship.first_name || "").trim()} ${(ship.last_name || "").trim()}`.trim() || (order.customer?.first_name ? `${order.customer.first_name} ${order.customer.last_name || ""}`.trim() : "Client inconnu"),
+      gouvernerat: ship.province || ship.province_code || "", // province from Shopify
+      ville: ship.city || "",
+      adresse: `${ship.address1 || ""}${ship.address2 ? " / " + ship.address2 : ""}`,
+      telephone: ship.phone || order.phone || (order.customer?.phone || ""),
+      telephone2: "" // optional second phone
+    };
 
-app.post('/shopify-webhook', async (req, res) => {
-    try {
-        const order = req.body;
+    // Build produit object using the first line item as a default.
+    // If you want to send multiple products adapt this to map all lineItems.
+    const firstItem = lineItems[0] || {};
+    const produit = {
+      article: firstItem.sku || firstItem.title || "article",
+      prix: Number(firstItem.price || firstItem.final_price || order.total_price || 0),
+      designation: firstItem.title || "produit",
+      nombreArticle: Number(firstItem.quantity || 1),
+      commentaire: (order.note || ""),
+      nombreEchange: 0
+    };
 
-        const client = {
-            nom: `${order.customer.first_name} ${order.customer.last_name}`,
-            gouvernerat: order.shipping_address.province || "",
-            ville: order.shipping_address.city,
-            adresse: order.shipping_address.address1,
-            telephone: order.customer.phone || "",
-            telephone2: ""
-        };
+    // Full payload matching FDG example
+    const payload = {
+      Client: client,
+      Produit: produit,
+      // optional extra fields FDG might accept — keep empty or add if needed
+      // Remarque: if FDG expects other top-level keys (e.g. "mode", "service"), add them here
+    };
 
-        const produits = order.line_items.map(item => ({
-            article: item.title,
-            prix: parseFloat(item.price),
-            designation: item.title,
-            nombreArticle: item.quantity,
-            commentaire: "",
-            nombreEchange: 0
-        }));
+    // Send to FDG
+    const fdgResponse = await axios.post(
+      `${process.env.FDG_API_URL || "https://www.firstdeliverygroup.com/api/v2"}/create`,
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": process.env.FDG_TOKEN || "d23aa970-7284-4035-a6bf-a29704192bce"
+          // If they expect "Bearer <token>" use ``Authorization: `Bearer ${process.env.FDG_TOKEN}```
+        },
+        timeout: 15000
+      }
+    );
 
-        for (const produit of produits) {
-            await axios.post(FDG_API_URL, {
-                Client: client,
-                Produit: produit
-            }, {
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${FDG_TOKEN}`
-                }
-            });
-        }
-
-        res.status(200).send({ status: 'success', message: 'Orders sent to First Delivery Group' });
-    } catch (err) {
-        console.error(err);
-        res.status(500).send({ status: 'error', message: err.message });
-    }
+    console.log("FDG response:", fdgResponse.data);
+    return res.status(200).json({ success: true, fdgResponse: fdgResponse.data });
+  } catch (err) {
+    console.error("Error sending to FDG:", err.response?.data || err.message || err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send order to FDG",
+      error: err.response?.data || err.message
+    });
+  }
 });
-
-app.listen(3000, () => console.log("Middleware server running on port 3000"));
